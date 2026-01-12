@@ -2,7 +2,7 @@ services:
   - type: web
     name: deeptutor
     env: docker
-    dockerFilePath: ./deploy/Dockerfile.render
+    dockerFilePath: deploy/Dockerfile.render
     plan: free
     branch: main
     envVars:
