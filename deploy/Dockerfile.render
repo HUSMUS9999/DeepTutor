@@ -25,8 +25,8 @@ RUN npm ci --legacy-peer-deps
 # Copy frontend source code
 COPY web/ ./
 
-# Create .env.local with placeholder
-RUN echo "NEXT_PUBLIC_API_BASE=__NEXT_PUBLIC_API_BASE_PLACEHOLDER__" > .env.local
+# Create .env.local - use empty string so frontend uses relative URLs (proxied via next.config.js rewrites)
+RUN echo "NEXT_PUBLIC_API_BASE=" > .env.local
 
 # Build Next.js
 # Use memory limit to prevent OOM during build
@@ -153,15 +153,8 @@ COPY <<'EOF' /app/start-frontend.sh
 #!/bin/bash
 set -e
 
-# Render provides the public URL in RENDER_EXTERNAL_URL
-# Or we use a manual override
-API_BASE="${NEXT_PUBLIC_API_BASE:-${RENDER_EXTERNAL_URL:-http://localhost:8001}}"
-
-echo "[Frontend] Setting API Base to: ${API_BASE}"
-
-# Replace placeholder in built files
-find /app/web/.next -type f \( -name "*.js" -o -name "*.json" \) -exec \
-    sed -i "s|__NEXT_PUBLIC_API_BASE_PLACEHOLDER__|${API_BASE}|g" {} \; 2>/dev/null || true
+echo "[Frontend] Starting Next.js on port ${PORT:-3782}"
+echo "[Frontend] API requests will be proxied to backend at http://localhost:8001"
 
 # Start Next.js on the PORT Render expects (usually passed via $PORT, defaulting to 3782 here)
 exec node node_modules/next/dist/bin/next start -H 0.0.0.0 -p ${PORT:-3782}

@@ -29,6 +29,20 @@ const nextConfig = {
     };
     return config;
   },
+
+  // Proxy API requests to backend (for Render deployment where only one port is exposed)
+  async rewrites() {
+    // In production on Render, proxy to internal backend
+    // BACKEND_URL can be set to internal URL, defaults to localhost:8001
+    const backendUrl = process.env.BACKEND_URL || 'http://localhost:8001';
+    
+    return [
+      {
+        source: '/api/:path*',
+        destination: `${backendUrl}/api/:path*`,
+      },
+    ];
+  },
 };
 
 module.exports = nextConfig;
