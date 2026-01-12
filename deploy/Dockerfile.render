@@ -1,0 +1,189 @@
+# ============================================
+# DeepTutor Dockerfile for Render Free Tier
+# ============================================
+# Adjusted for Render's 512MB RAM Limit
+# - Reduces build overhead
+# - Optimizes for single-process supervision
+# ============================================
+
+# ============================================
+# Stage 1: Frontend Builder
+# ============================================
+FROM node:22-slim AS frontend-builder
+
+WORKDIR /app/web
+
+# Accept build argument for backend port
+ARG BACKEND_PORT=8001
+
+# Copy package files first for better caching
+COPY web/package.json web/package-lock.json* ./
+
+# Install dependencies
+RUN npm ci --legacy-peer-deps
+
+# Copy frontend source code
+COPY web/ ./
+
+# Create .env.local with placeholder
+RUN echo "NEXT_PUBLIC_API_BASE=__NEXT_PUBLIC_API_BASE_PLACEHOLDER__" > .env.local
+
+# Build Next.js
+# Use memory limit to prevent OOM during build
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+RUN npm run build
+
+# ============================================
+# Stage 2: Python Base
+# ============================================
+FROM python:3.11-slim AS python-base
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Install only minimal build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (needed for tiktoken)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy and install python requirements
+COPY requirements.txt ./
+# Split heavy dependencies installation to avoid timeouts/memory issues
+RUN pip install --upgrade pip && \
+    pip install "numpy<2" "pandas<3" && \
+    pip install -r requirements.txt
+
+# ============================================
+# Stage 3: Production Image
+# ============================================
+FROM python:3.11-slim AS production
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NODE_ENV=production \
+    BACKEND_PORT=8001 \
+    FRONTEND_PORT=3782 \
+    PORT=3782
+
+WORKDIR /app
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    supervisor \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Node.js from builder
+COPY --from=frontend-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# Copy Python packages
+COPY --from=python-base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-base /usr/local/bin /usr/local/bin
+
+# Copy Frontend Build
+COPY --from=frontend-builder /app/web/.next ./web/.next
+COPY --from=frontend-builder /app/web/public ./web/public
+COPY --from=frontend-builder /app/web/package.json ./web/package.json
+COPY --from=frontend-builder /app/web/next.config.js ./web/next.config.js
+COPY --from=frontend-builder /app/web/node_modules ./web/node_modules
+
+# Copy Backend Source
+COPY src/ ./src/
+COPY config/ ./config/
+COPY scripts/ ./scripts/
+COPY pyproject.toml requirements.txt ./
+
+# Create data directories
+RUN mkdir -p data/user data/knowledge_bases /etc/supervisor/conf.d
+
+# Supervisor Config
+COPY <<EOF /etc/supervisor/conf.d/deeptutor.conf
+[supervisord]
+nodaemon=true
+logfile=/dev/null
+pidfile=/var/run/supervisord.pid
+
+[program:backend]
+command=python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8001
+directory=/app
+autostart=true
+autorestart=true
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+priority=1
+
+[program:frontend]
+command=/bin/bash /app/start-frontend.sh
+directory=/app/web
+autostart=true
+autorestart=true
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/fd/2
+stderr_logfile_maxbytes=0
+priority=5
+EOF
+
+# Startup Scripts
+COPY <<'EOF' /app/start-frontend.sh
+#!/bin/bash
+set -e
+
+# Render provides the public URL in RENDER_EXTERNAL_URL
+# Or we use a manual override
+API_BASE="${NEXT_PUBLIC_API_BASE:-${RENDER_EXTERNAL_URL:-http://localhost:8001}}"
+
+echo "[Frontend] Setting API Base to: ${API_BASE}"
+
+# Replace placeholder in built files
+find /app/web/.next -type f \( -name "*.js" -o -name "*.json" \) -exec \
+    sed -i "s|__NEXT_PUBLIC_API_BASE_PLACEHOLDER__|${API_BASE}|g" {} \; 2>/dev/null || true
+
+# Start Next.js on the PORT Render expects (usually passed via $PORT, defaulting to 3782 here)
+exec node node_modules/next/dist/bin/next start -H 0.0.0.0 -p ${PORT:-3782}
+EOF
+
+RUN chmod +x /app/start-frontend.sh
+
+# Entrypoint
+COPY <<'EOF' /app/entrypoint.sh
+#!/bin/bash
+set -e
+
+# Initialize if needed
+if [ ! -f "/app/data/user/user_history.json" ]; then
+    python -c "from pathlib import Path; from src.services.setup import init_user_directories; init_user_directories(Path('/app'))" 2>/dev/null || true
+fi
+
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/deeptutor.conf
+EOF
+
+RUN chmod +x /app/entrypoint.sh
+
+EXPOSE 8001 3782
+
+CMD ["/app/entrypoint.sh"]
