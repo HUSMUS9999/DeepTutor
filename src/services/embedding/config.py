@@ -64,9 +64,12 @@ def get_embedding_config() -> EmbeddingConfig:
     """
     Load embedding configuration from environment variables or provider manager.
 
+    Set EMBEDDING_USE_ENV=true to force using environment variables (useful for deployment).
+
     Priority:
-    1. Active provider from embedding_providers.json
-    2. Environment variables (.env)
+    1. Environment variables if EMBEDDING_USE_ENV=true
+    2. Active provider from embedding_providers.json
+    3. Environment variables (.env)
 
     Strategy for environment variables:
     1. Read EMBEDDING_BINDING to determine active provider
@@ -81,25 +84,29 @@ def get_embedding_config() -> EmbeddingConfig:
     Raises:
         ValueError: If required configuration is missing
     """
-    # 1. Try to get active provider from provider config manager
-    try:
-        from .provider_config import embedding_provider_config_manager
+    # Check if we should force env vars (useful for deployment)
+    use_env_only = os.getenv("EMBEDDING_USE_ENV", "").lower() in ("true", "1", "yes")
 
-        active_provider = embedding_provider_config_manager.get_active_provider()
+    # 1. Try to get active provider from provider config manager (unless EMBEDDING_USE_ENV is set)
+    if not use_env_only:
+        try:
+            from .provider_config import embedding_provider_config_manager
 
-        if active_provider:
-            return EmbeddingConfig(
-                binding=active_provider.binding,
-                model=active_provider.model,
-                api_key=active_provider.api_key or "",  # Empty string for local providers
-                base_url=active_provider.base_url,
-                dim=active_provider.dimensions,
-                input_type=active_provider.input_type,
-                normalized=active_provider.normalized,
-                truncate=active_provider.truncate,
-            )
-    except Exception as e:
-        print(f"⚠️ Failed to load active embedding provider: {e}")
+            active_provider = embedding_provider_config_manager.get_active_provider()
+
+            if active_provider:
+                return EmbeddingConfig(
+                    binding=active_provider.binding,
+                    model=active_provider.model,
+                    api_key=active_provider.api_key or "",  # Empty string for local providers
+                    base_url=active_provider.base_url,
+                    dim=active_provider.dimensions,
+                    input_type=active_provider.input_type,
+                    normalized=active_provider.normalized,
+                    truncate=active_provider.truncate,
+                )
+        except Exception as e:
+            print(f"⚠️ Failed to load active embedding provider: {e}")
 
     # 2. Fallback to environment variables
     binding = _strip_value(os.getenv("EMBEDDING_BINDING", "openai"))

@@ -69,9 +69,12 @@ def get_llm_config() -> LLMConfig:
     - api: Only use API providers (active API provider or env config)
     - local: Only use local providers (active local provider or env config)
 
+    Set LLM_USE_ENV=true to force using environment variables (useful for deployment).
+
     Priority:
-    1. Active provider from llm_providers.json (if mode compatible)
-    2. Environment variables (.env)
+    1. Environment variables if LLM_USE_ENV=true
+    2. Active provider from llm_providers.json (if mode compatible)
+    3. Environment variables (.env)
 
     Returns:
         LLMConfig: Configuration dataclass
@@ -81,34 +84,38 @@ def get_llm_config() -> LLMConfig:
     """
     mode = get_llm_mode()
 
-    # 1. Try to get active provider from provider manager
-    try:
-        from .provider import provider_manager
+    # Check if we should force env vars (useful for deployment)
+    use_env_only = os.getenv("LLM_USE_ENV", "").lower() in ("true", "1", "yes")
 
-        active_provider = provider_manager.get_active_provider()
+    # 1. Try to get active provider from provider manager (unless LLM_USE_ENV is set)
+    if not use_env_only:
+        try:
+            from .provider import provider_manager
 
-        if active_provider:
-            provider_is_local = getattr(active_provider, "provider_type", "local") == "local"
+            active_provider = provider_manager.get_active_provider()
 
-            # Check mode compatibility
-            use_provider = False
-            if mode == LLM_MODE_HYBRID:
-                use_provider = True
-            elif mode == LLM_MODE_API and not provider_is_local:
-                use_provider = True
-            elif mode == LLM_MODE_LOCAL and provider_is_local:
-                use_provider = True
+            if active_provider:
+                provider_is_local = getattr(active_provider, "provider_type", "local") == "local"
 
-            if use_provider:
-                return LLMConfig(
-                    binding=active_provider.binding,
-                    model=active_provider.model,
-                    api_key=active_provider.api_key,
-                    base_url=active_provider.base_url,
-                    provider_type=getattr(active_provider, "provider_type", "local"),
-                )
-    except Exception as e:
-        print(f"⚠️ Failed to load active provider: {e}")
+                # Check mode compatibility
+                use_provider = False
+                if mode == LLM_MODE_HYBRID:
+                    use_provider = True
+                elif mode == LLM_MODE_API and not provider_is_local:
+                    use_provider = True
+                elif mode == LLM_MODE_LOCAL and provider_is_local:
+                    use_provider = True
+
+                if use_provider:
+                    return LLMConfig(
+                        binding=active_provider.binding,
+                        model=active_provider.model,
+                        api_key=active_provider.api_key,
+                        base_url=active_provider.base_url,
+                        provider_type=getattr(active_provider, "provider_type", "local"),
+                    )
+        except Exception as e:
+            print(f"⚠️ Failed to load active provider: {e}")
 
     # 2. Fallback to environment variables
     binding = _strip_value(os.getenv("LLM_BINDING", "openai"))
